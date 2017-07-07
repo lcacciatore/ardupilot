@@ -87,9 +87,9 @@ int8_t Copter::dump_log(uint8_t argc, const Menu::arg *argv)
 
 int8_t Copter::erase_logs(uint8_t argc, const Menu::arg *argv)
 {
-    in_mavlink_delay = true;
+    DataFlash.EnableWrites(false);
     do_erase_logs();
-    in_mavlink_delay = false;
+    DataFlash.EnableWrites(true);
     return 0;
 }
 
@@ -376,7 +376,18 @@ void Copter::Log_Write_Attitude()
     Vector3f targets = attitude_control->get_att_target_euler_cd();
     targets.z = wrap_360_cd(targets.z);
     DataFlash.Log_Write_Attitude(ahrs, targets);
+    DataFlash.Log_Write_Rate(ahrs, *motors, *attitude_control, *pos_control);
+    if (should_log(MASK_LOG_PID)) {
+        DataFlash.Log_Write_PID(LOG_PIDR_MSG, attitude_control->get_rate_roll_pid().get_pid_info());
+        DataFlash.Log_Write_PID(LOG_PIDP_MSG, attitude_control->get_rate_pitch_pid().get_pid_info());
+        DataFlash.Log_Write_PID(LOG_PIDY_MSG, attitude_control->get_rate_yaw_pid().get_pid_info());
+        DataFlash.Log_Write_PID(LOG_PIDA_MSG, g.pid_accel_z.get_pid_info() );
+    }
+}
 
+// Write an EKF and POS packet
+void Copter::Log_Write_EKF_POS()
+{
  #if OPTFLOW == ENABLED
     DataFlash.Log_Write_EKF(ahrs,optflow.enabled());
  #else
@@ -896,9 +907,7 @@ void Copter::Log_Read(uint16_t list_entry, uint16_t start_page, uint16_t end_pag
 void Copter::Log_Write_Vehicle_Startup_Messages()
 {
     // only 200(?) bytes are guaranteed by DataFlash
-    char frame_buf[20];
-    snprintf(frame_buf, sizeof(frame_buf), "Frame: %s", get_frame_string());
-    DataFlash.Log_Write_Message(frame_buf);
+    DataFlash.Log_Write_MessageF("Frame: %s", get_frame_string());
     DataFlash.Log_Write_Mode(control_mode, control_mode_reason);
 #if AC_RALLY
     DataFlash.Log_Write_Rally(rally);
@@ -908,37 +917,28 @@ void Copter::Log_Write_Vehicle_Startup_Messages()
 }
 
 
-// start a new log
-void Copter::start_logging() 
+void Copter::start_logging()
 {
-    if (g.log_bitmask != 0 && !in_log_download) {
-        if (!ap.logging_started) {
-            ap.logging_started = true;
-            DataFlash.set_mission(&mission);
-            DataFlash.setVehicle_Startup_Log_Writer(FUNCTOR_BIND(&copter, &Copter::Log_Write_Vehicle_Startup_Messages, void));
-            DataFlash.StartNewLog();
-        } else if (!DataFlash.logging_started()) {
-            // dataflash may have stopped logging - when we get_log_data,
-            // for example.  Try to restart:
-            DataFlash.StartNewLog();
-        }
-        // enable writes
-        DataFlash.EnableWrites(true);
+    if (g.log_bitmask == 0) {
+        return;
     }
+    if (DataFlash.in_log_download()) {
+        return;
+    }
+
+    ap.logging_started = true;
+
+    // dataflash may have stopped logging - when we get_log_data,
+    // for example.  Always try to restart:
+    DataFlash.StartUnstartedLogging();
 }
 
 void Copter::log_init(void)
 {
     DataFlash.Init(log_structure, ARRAY_SIZE(log_structure));
-    if (!DataFlash.CardInserted()) {
-        gcs_send_text(MAV_SEVERITY_WARNING, "No dataflash card inserted");
-    } else if (DataFlash.NeedPrep()) {
-        gcs_send_text(MAV_SEVERITY_INFO, "Preparing log system");
-        DataFlash.Prep();
-        gcs_send_text(MAV_SEVERITY_INFO, "Prepared log system");
-        for (uint8_t i=0; i<num_gcs; i++) {
-            gcs_chan[i].reset_cli_timeout();
-        }
+
+    for (uint8_t i=0; i<num_gcs; i++) {
+        gcs_chan[i].reset_cli_timeout();
     }
 }
 
@@ -963,6 +963,7 @@ void Copter::Log_Write_Nav_Tuning() {}
 void Copter::Log_Write_Control_Tuning() {}
 void Copter::Log_Write_Performance() {}
 void Copter::Log_Write_Attitude(void) {}
+void Copter::Log_Write_EKF_POS() {}
 void Copter::Log_Write_MotBatt() {}
 void Copter::Log_Write_Event(uint8_t id) {}
 void Copter::Log_Write_Data(uint8_t id, int32_t value) {}
@@ -975,11 +976,12 @@ void Copter::Log_Write_Baro(void) {}
 void Copter::Log_Write_Parameter_Tuning(uint8_t param, float tuning_val, int16_t control_in, int16_t tune_low, int16_t tune_high) {}
 void Copter::Log_Write_Home_And_Origin() {}
 void Copter::Log_Sensor_Health() {}
+void Copter::Log_Write_Precland() {}
 void Copter::Log_Write_GuidedTarget(uint8_t target_type, const Vector3f& pos_target, const Vector3f& vel_target) {}
+void Copter::Log_Write_Throw(ThrowModeStage stage, float velocity, float velocity_z, float accel, float ef_accel_z, bool throw_detect, bool attitude_ok, bool height_ok, bool pos_ok) {}
 void Copter::Log_Write_Proximity() {}
 void Copter::Log_Write_Beacon() {}
-void Copter::Log_Write_Precland() {}
-void Copter::Log_Write_Throw(ThrowModeStage stage, float velocity, float velocity_z, float accel, float ef_accel_z, bool throw_detect, bool attitude_ok, bool height_ok, bool pos_ok) {}
+void Copter::Log_Write_Vehicle_Startup_Messages() {}
 
 #if FRAME_CONFIG == HELI_FRAME
 void Copter::Log_Write_Heli() {}

@@ -31,7 +31,13 @@ void Sub::init_ardupilot()
     load_parameters();
 
     BoardConfig.init();
+#if HAL_WITH_UAVCAN
+    BoardConfig_CAN.init();
+#endif
 
+    // identify ourselves correctly with the ground station
+    mavlink_system.sysid = g.sysid_this_mav;
+    
     // initialise serial port
     serial_manager.init();
 
@@ -60,9 +66,6 @@ void Sub::init_ardupilot()
         gcs_chan[i].setup_uart(serial_manager, AP_SerialManager::SerialProtocol_MAVLink, i);
     }
 
-    // identify ourselves correctly with the ground station
-    mavlink_system.sysid = g.sysid_this_mav;
-
 #if LOGGING_ENABLED == ENABLED
     log_init();
 #endif
@@ -85,7 +88,8 @@ void Sub::init_ardupilot()
     hal.scheduler->register_timer_failsafe(failsafe_check_static, 1000);
 
     // Do GPS init
-    gps.init(&DataFlash, serial_manager);
+    gps.set_log_gps_bit(MASK_LOG_GPS);
+    gps.init(serial_manager);
 
     if (g.compass_enabled) {
         init_compass();
@@ -123,8 +127,7 @@ void Sub::init_ardupilot()
     USERHOOK_INIT
 #endif
 
-    // read Baro pressure at ground
-    //-----------------------------
+    // Init baro and determine if we have external (depth) pressure sensor
     init_barometer(false);
     barometer.update();
 
@@ -132,12 +135,13 @@ void Sub::init_ardupilot()
         if (barometer.get_type(i) == AP_Baro::BARO_TYPE_WATER) {
             barometer.set_primary_baro(i);
             depth_sensor_idx = i;
-            sensor_health.depth = barometer.healthy(i);
-            break;
+            ap.depth_sensor_present = true;
+            sensor_health.depth = barometer.healthy(depth_sensor_idx); // initialize health flag
+            break; // Go with the first one we find
         }
     }
 
-    if (!sensor_health.depth) {
+    if (!ap.depth_sensor_present) {
         // We only have onboard baro
         // No external underwater depth sensor detected
         barometer.set_primary_baro(0);
@@ -165,6 +169,10 @@ void Sub::init_ardupilot()
     // initialise mission library
     mission.init();
 
+    // initialise DataFlash library
+    DataFlash.set_mission(&mission);
+    DataFlash.setVehicle_Startup_Log_Writer(FUNCTOR_BIND(&sub, &Sub::Log_Write_Vehicle_Startup_Messages, void));
+
     startup_INS_ground();
 
     // we don't want writes to the serial port to cause us to pause
@@ -175,8 +183,7 @@ void Sub::init_ardupilot()
     // enable CPU failsafe
     mainloop_failsafe_enable();
 
-    ins.set_raw_logging(should_log(MASK_LOG_IMU_RAW));
-    ins.set_dataflash(&DataFlash);
+    ins.set_log_raw_bit(MASK_LOG_IMU_RAW);
 
     // init vehicle capabilties
     init_capabilities();
@@ -185,6 +192,9 @@ void Sub::init_ardupilot()
         start_logging(); // create a new log if necessary
     }
 
+    // disable safety if requested
+    BoardConfig.init_safety();    
+    
     hal.console->print("\nInit complete");
 
     // flag that initialisation has completed
@@ -284,11 +294,11 @@ bool Sub::optflow_position_ok()
 bool Sub::should_log(uint32_t mask)
 {
 #if LOGGING_ENABLED == ENABLED
-    if (!(mask & g.log_bitmask) || in_mavlink_delay) {
+    if (!DataFlash.should_log(mask)) {
         return false;
     }
-    bool ret = DataFlash.logging_started() && (motors.armed() || DataFlash.log_while_disarmed());
-    return ret;
+    start_logging();
+    return true;
 #else
     return false;
 #endif

@@ -18,7 +18,7 @@ const AP_Param::GroupInfo QuadPlane::var_info[] = {
     // @Param: ANGLE_MAX
     // @DisplayName: Angle Max
     // @Description: Maximum lean angle in all VTOL flight modes
-    // @Units: Centi-degrees
+    // @Units: cdeg
     // @Range: 1000 8000
     // @User: Advanced
     AP_GROUPINFO("ANGLE_MAX", 10, QuadPlane, aparm.angle_max, 3000),
@@ -26,7 +26,7 @@ const AP_Param::GroupInfo QuadPlane::var_info[] = {
     // @Param: TRANSITION_MS
     // @DisplayName: Transition time
     // @Description: Transition time in milliseconds after minimum airspeed is reached
-    // @Units: milliseconds
+    // @Units: ms
     // @Range: 0 30000
     // @User: Advanced
     AP_GROUPINFO("TRANSITION_MS", 11, QuadPlane, transition_time_ms, 5000),
@@ -91,7 +91,7 @@ const AP_Param::GroupInfo QuadPlane::var_info[] = {
     // @DisplayName: Throttle acceleration controller I gain maximum
     // @Description: Throttle acceleration controller I gain maximum.  Constrains the maximum pwm that the I term will generate
     // @Range: 0 1000
-    // @Units: Percent*10
+    // @Units: d%
     // @User: Standard
 
     // @Param: AZ_D
@@ -115,7 +115,7 @@ const AP_Param::GroupInfo QuadPlane::var_info[] = {
     // @Param: VELZ_MAX
     // @DisplayName: Pilot maximum vertical speed
     // @Description: The maximum vertical velocity the pilot may request in cm/s
-    // @Units: Centimeters/Second
+    // @Units: cm/s
     // @Range: 50 500
     // @Increment: 10
     // @User: Standard
@@ -173,7 +173,7 @@ const AP_Param::GroupInfo QuadPlane::var_info[] = {
     // @Param: YAW_RATE_MAX
     // @DisplayName: Maximum yaw rate
     // @Description: This is the maximum yaw rate in degrees/second
-    // @Units: degrees/second
+    // @Units: deg/s
     // @Range: 50 500
     // @Increment: 1
     // @User: Standard
@@ -204,7 +204,7 @@ const AP_Param::GroupInfo QuadPlane::var_info[] = {
     // @Description: Maximum pitch during transition to auto fixed wing flight
     // @User: Standard
     // @Range: 0 30
-    // @Units: Degrees
+    // @Units: deg
     // @Increment: 1
     AP_GROUPINFO("TRAN_PIT_MAX", 29, QuadPlane, transition_pitch_max, 3),
 
@@ -213,7 +213,7 @@ const AP_Param::GroupInfo QuadPlane::var_info[] = {
     // @Param: FRAME_CLASS
     // @DisplayName: Frame Class
     // @Description: Controls major frame class for multicopter component
-    // @Values: 0:Undefined, 1:Quad, 2:Hexa, 3:Octa, 4:OctaQuad, 5:Y6, 7:Tri
+    // @Values: 0:Undefined, 1:Quad, 2:Hexa, 3:Octa, 4:OctaQuad, 5:Y6, 7:Tri, 10: TailSitter
     // @User: Standard
     AP_GROUPINFO("FRAME_CLASS", 46, QuadPlane, frame_class, 1),
 
@@ -273,7 +273,7 @@ const AP_Param::GroupInfo QuadPlane::var_info[] = {
     // @Param: TILT_RATE_UP
     // @DisplayName: Tiltrotor upwards tilt rate
     // @Description: This is the maximum speed at which the motor angle will change for a tiltrotor when moving from forward flight to hover
-    // @Units: degrees/second
+    // @Units: deg/s
     // @Increment: 1
     // @Range: 10 300
     // @User: Standard
@@ -282,7 +282,7 @@ const AP_Param::GroupInfo QuadPlane::var_info[] = {
     // @Param: TILT_MAX
     // @DisplayName: Tiltrotor maximum VTOL angle
     // @Description: This is the maximum angle of the tiltable motors at which multicopter control will be enabled. Beyond this angle the plane will fly solely as a fixed wing aircraft and the motors will tilt to their maximum angle at the TILT_RATE
-    // @Units: degrees
+    // @Units: deg
     // @Increment: 1
     // @Range: 20 80
     // @User: Standard
@@ -322,7 +322,7 @@ const AP_Param::GroupInfo QuadPlane::var_info[] = {
     // @Param: ASSIST_ANGLE
     // @DisplayName: Quadplane assistance angle
     // @Description: This is the angular error in attitude beyond which the quadplane VTOL motors will provide stability assistance. This will only be used if Q_ASSIST_SPEED is also non-zero. Assistance will be given if the attitude is outside the normal attitude limits by at least 5 degrees and the angular error in roll or pitch is greater than this angle for at least 1 second. Set to zero to disable angle assistance.
-    // @Units: degrees
+    // @Units: deg
     // @Range: 0 90
     // @Increment: 1
     // @User: Standard
@@ -343,7 +343,7 @@ const AP_Param::GroupInfo QuadPlane::var_info[] = {
     // @Param: TILT_RATE_DN
     // @DisplayName: Tiltrotor downwards tilt rate
     // @Description: This is the maximum speed at which the motor angle will change for a tiltrotor when moving from hover to forward flight. When this is zero the Q_TILT_RATE_UP value is used.
-    // @Units: degrees/second
+    // @Units: deg/s
     // @Increment: 1
     // @Range: 10 300
     // @User: Standard
@@ -386,6 +386,13 @@ const AP_Param::GroupInfo QuadPlane::var_info[] = {
     // @Description: This is the angle of the tilt servos when in VTOL mode and at minimum output. This needs to be set for Q_TILT_TYPE=3 to enable vectored control for yaw of tricopter tilt quadplanes.
     // @Range: 0 30
     AP_GROUPINFO("TILT_YAW_ANGLE", 55, QuadPlane, tilt.tilt_yaw_angle, 0),
+
+    // @Param: TAILSIT_VHPOW
+    // @DisplayName: Tailsitter vector thrust gain power
+    // @Description: This controls the amount of extra pitch given to the vectored control when at high pitch errors
+    // @Range: 0 4
+    // @Increment: 0.1
+    AP_GROUPINFO("TAILSIT_VHPOW", 56, QuadPlane, tailsitter.vectored_hover_power, 2.5),
     
     AP_GROUPEND
 };
@@ -785,7 +792,7 @@ void QuadPlane::check_yaw_reset(void)
     if (new_ekfYawReset_ms != ekfYawReset_ms) {
         attitude_control->shift_ef_yaw_target(degrees(yaw_angle_change_rad) * 100);
         ekfYawReset_ms = new_ekfYawReset_ms;
-        GCS_MAVLINK::send_statustext_all(MAV_SEVERITY_INFO, "EKF yaw reset %.2f", degrees(yaw_angle_change_rad));
+        GCS_MAVLINK::send_statustext_all(MAV_SEVERITY_INFO, "EKF yaw reset %.2f", (double)degrees(yaw_angle_change_rad));
     }
 }
 

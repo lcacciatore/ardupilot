@@ -127,6 +127,9 @@ void Copter::init_ardupilot()
     hal.scheduler->register_delay_callback(mavlink_delay_cb_static, 5);
     
     BoardConfig.init();
+#if HAL_WITH_UAVCAN
+    BoardConfig_CAN.init();
+#endif
 
     // init cargo gripper
 #if GRIPPER_ENABLED == ENABLED
@@ -184,7 +187,11 @@ void Copter::init_ardupilot()
     // allocate the motors class
     allocate_motors();
 
-    init_rc_out();              // sets up motors and output to escs
+    // sets up motors and output to escs
+    init_rc_out();
+
+    // motors initialised so parameters can be sent
+    ap.initialised_params = true;
 
     // initialise which outputs Servo and Relay events can use
     ServoRelayEvents.set_channel_mask(~motors->get_motor_mask());
@@ -197,14 +204,14 @@ void Copter::init_ardupilot()
      */
     hal.scheduler->register_timer_failsafe(failsafe_check_static, 1000);
 
-    // give AHRS the rnage beacon sensor
+    // give AHRS the range beacon sensor
     ahrs.set_beacon(&g2.beacon);
 
     // Do GPS init
-    gps.init(&DataFlash, serial_manager);
+    gps.set_log_gps_bit(MASK_LOG_GPS);
+    gps.init(serial_manager);
 
-    if(g.compass_enabled)
-        init_compass();
+    init_compass();
 
 #if OPTFLOW == ENABLED
     // make optflow available to AHRS
@@ -288,6 +295,10 @@ void Copter::init_ardupilot()
     // initialise mission library
     mission.init();
 
+    // initialise DataFlash library
+    DataFlash.set_mission(&mission);
+    DataFlash.setVehicle_Startup_Log_Writer(FUNCTOR_BIND(&copter, &Copter::Log_Write_Vehicle_Startup_Messages, void));
+
     // initialise the flight mode and aux switch
     // ---------------------------
     reset_control_switch();
@@ -307,14 +318,16 @@ void Copter::init_ardupilot()
     // enable CPU failsafe
     failsafe_enable();
 
-    ins.set_raw_logging(should_log(MASK_LOG_IMU_RAW));
-    ins.set_dataflash(&DataFlash);
+    ins.set_log_raw_bit(MASK_LOG_IMU_RAW);
 
     // enable output to motors
     arming.pre_arm_rc_checks(true);
     if (ap.pre_arm_rc_check) {
         enable_motor_output();
     }
+
+    // disable safety if requested
+    BoardConfig.init_safety();
 
     cliSerial->printf("\nReady to FLY ");
 
@@ -439,7 +452,7 @@ void Copter::update_auto_armed()
         if(mode_has_manual_throttle(control_mode) && ap.throttle_zero && !failsafe.radio) {
             set_auto_armed(false);
         }
-#if FRAME_CONFIG == HELI_FRAME 
+#if FRAME_CONFIG == HELI_FRAME
         // if helicopters are on the ground, and the motor is switched off, auto-armed should be false
         // so that rotor runup is checked again before attempting to take-off
         if(ap.land_complete && !motors->rotor_runup_complete()) {
@@ -481,14 +494,11 @@ void Copter::check_usb_mux(void)
 bool Copter::should_log(uint32_t mask)
 {
 #if LOGGING_ENABLED == ENABLED
-    if (!(mask & g.log_bitmask) || in_mavlink_delay) {
+    if (!DataFlash.should_log(mask)) {
         return false;
     }
-    bool ret = motors->armed() || DataFlash.log_while_disarmed();
-    if (ret && !DataFlash.logging_started() && !in_log_download) {
-        start_logging();
-    }
-    return ret;
+    start_logging();
+    return true;
 #else
     return false;
 #endif
@@ -525,6 +535,8 @@ uint8_t Copter::get_frame_mav_type()
         case AP_Motors::MOTOR_FRAME_COAX:
         case AP_Motors::MOTOR_FRAME_TAILSITTER:
             return MAV_TYPE_COAXIAL;
+        case AP_Motors::MOTOR_FRAME_DODECAHEXA:
+            return MAV_TYPE_HEXAROTOR;
     }
     // unknown frame so return generic
     return MAV_TYPE_GENERIC;
@@ -556,6 +568,8 @@ const char* Copter::get_frame_string()
             return "COAX";
         case AP_Motors::MOTOR_FRAME_TAILSITTER:
             return "TAILSITTER";
+        case AP_Motors::MOTOR_FRAME_DODECAHEXA:
+            return "DODECA_HEXA";
         case AP_Motors::MOTOR_FRAME_UNDEFINED:
         default:
             return "UNKNOWN";
@@ -574,6 +588,7 @@ void Copter::allocate_motors(void)
         case AP_Motors::MOTOR_FRAME_Y6:
         case AP_Motors::MOTOR_FRAME_OCTA:
         case AP_Motors::MOTOR_FRAME_OCTAQUAD:
+        case AP_Motors::MOTOR_FRAME_DODECAHEXA:
         default:
             motors = new AP_MotorsMatrix(MAIN_LOOP_RATE);
             motors_var_info = AP_MotorsMatrix::var_info;
@@ -607,7 +622,7 @@ void Copter::allocate_motors(void)
             motors = new AP_MotorsHeli_Single(MAIN_LOOP_RATE);
             motors_var_info = AP_MotorsHeli_Single::var_info;
             AP_Param::set_frame_type_flags(AP_PARAM_FRAME_HELI);
-            break;            
+            break;
 #endif
     }
     if (motors == nullptr) {
@@ -674,6 +689,11 @@ void Copter::allocate_motors(void)
         break;
     }
 
+    // brushed 16kHz defaults to 16kHz pulses
+    if (motors->get_pwm_type() >= AP_Motors::PWM_TYPE_BRUSHED) {
+        g.rc_speed.set_default(16000);
+    }
+    
     if (upgrading_frame_params) {
         // do frame specific upgrade. This is only done the first time we run the new firmware
 #if FRAME_CONFIG == HELI_FRAME

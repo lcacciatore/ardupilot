@@ -272,12 +272,12 @@ void NOINLINE Sub::send_nav_controller_output(mavlink_channel_t chan)
     const Vector3f &targets = attitude_control.get_att_target_euler_cd();
     mavlink_msg_nav_controller_output_send(
         chan,
-        targets.x / 1.0e2f,
-        targets.y / 1.0e2f,
-        targets.z / 1.0e2f,
-        wp_nav.get_wp_bearing_to_destination() / 1.0e2f,
-        wp_nav.get_wp_distance_to_destination() / 1.0e2f,
-        pos_control.get_alt_error() / 1.0e2f,
+        targets.x * 1.0e-2f,
+        targets.y * 1.0e-2f,
+        targets.z * 1.0e-2f,
+        wp_nav.get_wp_bearing_to_destination() * 1.0e-2f,
+        MIN(wp_nav.get_wp_distance_to_destination() * 1.0e-2f, UINT16_MAX),
+        pos_control.get_alt_error() * 1.0e-2f,
         0,
         0);
 }
@@ -338,20 +338,6 @@ void NOINLINE Sub::send_current_waypoint(mavlink_channel_t chan)
 {
     mavlink_msg_mission_current_send(chan, mission.get_current_nav_index());
 }
-
-#if RANGEFINDER_ENABLED == ENABLED
-void NOINLINE Sub::send_rangefinder(mavlink_channel_t chan)
-{
-    // exit immediately if rangefinder is disabled
-    if (!rangefinder.has_data_orient(ROTATION_PITCH_270)) {
-        return;
-    }
-    mavlink_msg_rangefinder_send(
-        chan,
-        rangefinder.distance_cm_orient(ROTATION_PITCH_270) * 0.01f,
-        rangefinder.voltage_mv_orient(ROTATION_PITCH_270) * 0.001f);
-}
-#endif
 
 /*
   send RPM packet
@@ -502,6 +488,7 @@ bool GCS_MAVLINK_Sub::try_send_message(enum ap_message id)
 
     case MSG_GPS_RAW:
         send_gps_raw(sub.gps);
+        break;
 
     case MSG_SYSTEM_TIME:
         CHECK_PAYLOAD_SIZE(SYSTEM_TIME);
@@ -560,7 +547,9 @@ bool GCS_MAVLINK_Sub::try_send_message(enum ap_message id)
     case MSG_RANGEFINDER:
 #if RANGEFINDER_ENABLED == ENABLED
         CHECK_PAYLOAD_SIZE(RANGEFINDER);
-        sub.send_rangefinder(chan);
+        send_rangefinder_downward(sub.rangefinder);
+        CHECK_PAYLOAD_SIZE(DISTANCE_SENSOR);
+        send_distance_sensor_downward(sub.rangefinder);
 #endif
         break;
 
@@ -650,6 +639,7 @@ bool GCS_MAVLINK_Sub::try_send_message(enum ap_message id)
     case MSG_WIND:
     case MSG_POSITION_TARGET_GLOBAL_INT:
     case MSG_AOA_SSA:
+    case MSG_LANDING:
         // unused
         break;
 
@@ -774,21 +764,12 @@ GCS_MAVLINK_Sub::data_stream_send(void)
     }
 
     if (!sub.in_mavlink_delay && !sub.motors.armed()) {
-        handle_log_send(sub.DataFlash);
+        sub.DataFlash.handle_log_send(*this);
     }
 
     sub.gcs_out_of_time = false;
 
-    if (_queued_parameter != NULL) {
-        if (streamRates[STREAM_PARAMS].get() <= 0) {
-            streamRates[STREAM_PARAMS].set(10);
-        }
-        if (stream_trigger(STREAM_PARAMS)) {
-            send_message(MSG_NEXT_PARAM);
-        }
-        // don't send anything else at the same time as parameters
-        return;
-    }
+    send_queued_parameters();
 
     if (sub.gcs_out_of_time) {
         return;
@@ -1146,7 +1127,7 @@ void GCS_MAVLINK_Sub::handleMessage(mavlink_message_t* msg)
             // param7 : altitude (absolute)
             result = MAV_RESULT_FAILED; // assume failure
             if (is_equal(packet.param1,1.0f) || (is_zero(packet.param5) && is_zero(packet.param6) && is_zero(packet.param7))) {
-                if (sub.set_home_to_current_location_and_lock()) {
+                if (sub.set_home_to_current_location(true)) {
                     result = MAV_RESULT_ACCEPTED;
                 }
             } else {
@@ -1159,7 +1140,7 @@ void GCS_MAVLINK_Sub::handleMessage(mavlink_message_t* msg)
                 new_home_loc.lng = (int32_t)(packet.param6 * 1.0e7f);
                 new_home_loc.alt = (int32_t)(packet.param7 * 100.0f);
                 if (!sub.far_from_EKF_origin(new_home_loc)) {
-                    if (sub.set_home_and_lock(new_home_loc)) {
+                    if (sub.set_home(new_home_loc, true)) {
                         result = MAV_RESULT_ACCEPTED;
                     }
                 }
@@ -1214,6 +1195,10 @@ void GCS_MAVLINK_Sub::handleMessage(mavlink_message_t* msg)
                                    packet.param6)) {
                 sub.log_picture();
             }
+            result = MAV_RESULT_ACCEPTED;
+            break;
+        case MAV_CMD_DO_SET_CAM_TRIGG_DIST:
+            sub.camera.set_trigger_distance(packet.param1);
             result = MAV_RESULT_ACCEPTED;
             break;
 #endif // CAMERA == ENABLED
@@ -1651,22 +1636,6 @@ void GCS_MAVLINK_Sub::handleMessage(mavlink_message_t* msg)
         break;
     }
 
-    case MAVLINK_MSG_ID_LOG_REQUEST_DATA:
-    case MAVLINK_MSG_ID_LOG_ERASE:
-        sub.in_log_download = true;
-        /* no break */
-    case MAVLINK_MSG_ID_LOG_REQUEST_LIST:
-        if (!sub.in_mavlink_delay && !sub.motors.armed()) {
-            handle_log_message(msg, sub.DataFlash);
-        }
-        break;
-    case MAVLINK_MSG_ID_LOG_REQUEST_END:
-        sub.in_log_download = false;
-        if (!sub.in_mavlink_delay && !sub.motors.armed()) {
-            handle_log_message(msg, sub.DataFlash);
-        }
-        break;
-
     case MAVLINK_MSG_ID_SERIAL_CONTROL:
         handle_serial_control(msg, sub.gps);
         break;
@@ -1776,10 +1745,6 @@ void GCS_MAVLINK_Sub::handleMessage(mavlink_message_t* msg)
     }
 #endif // AC_RALLY == ENABLED
 
-    case MAVLINK_MSG_ID_REMOTE_LOG_BLOCK_STATUS:
-        sub.DataFlash.remote_log_block_status_msg(chan, msg);
-        break;
-
     case MAVLINK_MSG_ID_AUTOPILOT_VERSION_REQUEST:
         send_autopilot_version(FIRMWARE_VERSION);
         break;
@@ -1793,7 +1758,7 @@ void GCS_MAVLINK_Sub::handleMessage(mavlink_message_t* msg)
         mavlink_set_home_position_t packet;
         mavlink_msg_set_home_position_decode(msg, &packet);
         if ((packet.latitude == 0) && (packet.longitude == 0) && (packet.altitude == 0)) {
-            sub.set_home_to_current_location_and_lock();
+            sub.set_home_to_current_location(true);
         } else {
             // sanity check location
             if (!check_latlng(packet.latitude, packet.longitude)) {
@@ -1806,7 +1771,7 @@ void GCS_MAVLINK_Sub::handleMessage(mavlink_message_t* msg)
             if (sub.far_from_EKF_origin(new_home_loc)) {
                 break;
             }
-            sub.set_home_and_lock(new_home_loc);
+            sub.set_home(new_home_loc, true);
         }
         break;
     }
@@ -1844,6 +1809,7 @@ void Sub::mavlink_delay_cb()
     }
 
     in_mavlink_delay = true;
+    DataFlash.EnableWrites(false);
 
     uint32_t tnow = millis();
     if (tnow - last_1hz > 1000) {
@@ -1863,6 +1829,7 @@ void Sub::mavlink_delay_cb()
         gcs_send_text(MAV_SEVERITY_INFO, "Initialising APM");
     }
 
+    DataFlash.EnableWrites(true);
     in_mavlink_delay = false;
 }
 

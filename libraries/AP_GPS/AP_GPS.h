@@ -28,17 +28,18 @@
    than 1 then redundant sensors may be available
  */
 #define GPS_MAX_RECEIVERS 2 // maximum number of physical GPS sensors allowed - does not include virtual GPS created by blending receiver data
-#define GPS_MAX_INSTANCES  (GPS_MAX_RECEIVERS + 1) // maximumum number of GPs instances including the 'virtual' GPS created by blending receiver data
+#define GPS_MAX_INSTANCES  (GPS_MAX_RECEIVERS + 1) // maximum number of GPs instances including the 'virtual' GPS created by blending receiver data
 #define GPS_BLENDED_INSTANCE GPS_MAX_RECEIVERS  // the virtual blended GPS is always the highest instance (2)
 #define GPS_RTK_INJECT_TO_ALL 127
 #define GPS_MAX_RATE_MS 200 // maximum value of rate_ms (i.e. slowest update rate) is 5hz or 200ms
+#define GPS_UNKNOWN_DOP UINT16_MAX // set unknown DOP's to maximum value, which is also correct for MAVLink
+#define GPS_WORST_LAG_SEC 0.22f // worst lag value any GPS driver is expected to return, expressed in seconds
 
 // the number of GPS leap seconds
 #define GPS_LEAPSECONDS_MILLIS 18000ULL
 
-#define UNIX_OFFSET_MSEC (17000ULL * 86400ULL + 52ULL * 10ULL * MSEC_PER_WEEK - GPS_LEAPSECONDS_MILLIS)
+#define UNIX_OFFSET_MSEC (17000ULL * 86400ULL + 52ULL * 10ULL * AP_MSEC_PER_WEEK - GPS_LEAPSECONDS_MILLIS)
 
-class DataFlash_Class;
 class AP_GPS_Backend;
 
 /// @class AP_GPS
@@ -132,19 +133,19 @@ public:
         uint16_t hdop;                      ///< horizontal dilution of precision in cm
         uint16_t vdop;                      ///< vertical dilution of precision in cm
         uint8_t num_sats;                   ///< Number of visible satellites
-        Vector3f velocity;                  ///< 3D velocitiy in m/s, in NED format
+        Vector3f velocity;                  ///< 3D velocity in m/s, in NED format
         float speed_accuracy;               ///< 3D velocity accuracy estimate in m/s
         float horizontal_accuracy;          ///< horizontal accuracy estimate in m
         float vertical_accuracy;            ///< vertical accuracy estimate in m
         bool have_vertical_velocity:1;      ///< does GPS give vertical velocity? Set to true only once available.
         bool have_speed_accuracy:1;         ///< does GPS give speed accuracy? Set to true only once available.
         bool have_horizontal_accuracy:1;    ///< does GPS give horizontal position accuracy? Set to true only once available.
-        bool have_vertical_accuracy:1;      ///< does GPS give vertical position accuract? Set to true only once available.
+        bool have_vertical_accuracy:1;      ///< does GPS give vertical position accuracy? Set to true only once available.
         uint32_t last_gps_time_ms;          ///< the system time we got the last GPS timestamp, milliseconds
     };
 
     /// Startup initialisation.
-    void init(DataFlash_Class *dataflash, const AP_SerialManager& serial_manager);
+    void init(const AP_SerialManager& serial_manager);
 
     /// Update GPS state based on possible bytes received from the module.
     /// This routine must be called periodically (typically at 10Hz or
@@ -305,8 +306,11 @@ public:
     }
 
     // the expected lag (in seconds) in the position and velocity readings from the gps
-    float get_lag(uint8_t instance) const;
-    float get_lag(void) const { return get_lag(primary_instance); }
+    // return true if the GPS hardware configuration is known or the lag parameter has been set manually
+    bool get_lag(uint8_t instance, float &lag_sec) const;
+    bool get_lag(float &lag_sec) const {
+        return get_lag(primary_instance, lag_sec);
+    }
 
     // return a 3D vector defining the offset of the GPS antenna in meters relative to the body frame origin
     const Vector3f &get_antenna_offset(uint8_t instance) const;
@@ -323,8 +327,8 @@ public:
     void lock_port(uint8_t instance, bool locked);
 
     //Inject a packet of raw binary to a GPS
-    void inject_data(uint8_t *data, uint8_t len);
-    void inject_data(uint8_t instance, uint8_t *data, uint8_t len);
+    void inject_data(uint8_t *data, uint16_t len);
+    void inject_data(uint8_t instance, uint8_t *data, uint16_t len);
 
     //MAVLink Status Sending
     void send_mavlink_gps_raw(mavlink_channel_t chan);
@@ -365,10 +369,10 @@ public:
 
     void Write_DataFlash_Log_Startup_messages();
 
-protected:
+    // indicate which bit in LOG_BITMASK indicates gps logging enabled
+    void set_log_gps_bit(uint32_t bit) { _log_gps_bit = bit; }
 
-    // dataflash for logging, if available
-    DataFlash_Class *_DataFlash;
+protected:
 
     // configuration parameters
     AP_Int8 _type[GPS_MAX_RECEIVERS];
@@ -390,8 +394,13 @@ protected:
     AP_Int8 _blend_mask;
     AP_Float _blend_tc;
 
+    uint32_t _log_gps_bit = -1;
+
 private:
-    // return gps update rate in milliseconds
+    // returns the desired gps update rate in milliseconds
+    // this does not provide any gurantee that the GPS is updating at the requested
+    // rate it is simply a helper for use in the backends for determining what rate
+    // they should be configuring the GPS to run at
     uint16_t get_rate_ms(uint8_t instance) const;
 
     struct GPS_timing {
@@ -418,9 +427,9 @@ private:
 
     // state of auto-detection process, per instance
     struct detect_state {
-        uint32_t detect_started_ms;
         uint32_t last_baud_change_ms;
         uint8_t current_baud;
+        bool auto_detected_baud;
         struct UBLOX_detect_state ublox_detect_state;
         struct MTK_detect_state mtk_detect_state;
         struct MTK19_detect_state mtk19_detect_state;
@@ -466,9 +475,6 @@ private:
     // re-assemble GPS_RTCM_DATA message
     void handle_gps_rtcm_data(const mavlink_message_t *msg);
 
-    // inject data into all backends
-    void inject_data_all(const uint8_t *data, uint16_t len);
-
     // GPS blending and switching
     Vector2f _NE_pos_offset_m[GPS_MAX_RECEIVERS]; // Filtered North,East position offset from GPS instance to blended solution in _output_state.location (m)
     float _hgt_offset_cm[GPS_MAX_RECEIVERS]; // Filtered height offset from GPS instance relative to blended solution in _output_state.location (cm)
@@ -485,4 +491,11 @@ private:
 
     // calculate the blended state
     void calc_blended_state(void);
+
+    // Auto configure types
+    enum GPS_AUTO_CONFIG {
+        GPS_AUTO_CONFIG_DISABLE = 0,
+        GPS_AUTO_CONFIG_ENABLE  = 1
+    };
+
 };

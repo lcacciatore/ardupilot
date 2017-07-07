@@ -21,7 +21,7 @@ const AP_HAL::HAL& hal = AP_HAL::get_HAL();
   constructor for main Copter class
  */
 Copter::Copter(void) :
-    DataFlash{FIRMWARE_STRING},
+    DataFlash{FIRMWARE_STRING, g.log_bitmask},
     flight_modes(&g.flight_mode1),
     mission(ahrs, 
             FUNCTOR_BIND_MEMBER(&Copter::start_command, bool, const AP_Mission::Mission_Command &),
@@ -80,7 +80,7 @@ Copter::Copter(void) :
     fence(ahrs, inertial_nav),
 #endif
 #if AC_AVOID_ENABLED == ENABLED
-    avoid(ahrs, inertial_nav, fence, g2.proximity),
+    avoid(ahrs, inertial_nav, fence, g2.proximity, &g2.beacon),
 #endif
 #if AC_RALLY == ENABLED
     rally(ahrs),

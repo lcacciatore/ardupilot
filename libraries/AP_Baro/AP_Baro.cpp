@@ -25,8 +25,10 @@
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Math/AP_Math.h>
 #include <AP_BoardConfig/AP_BoardConfig.h>
+#include <AP_BoardConfig/AP_BoardConfig_CAN.h>
 #include <AP_Vehicle/AP_Vehicle_Type.h>
 
+#include "AP_Baro_SITL.h"
 #include "AP_Baro_BMP085.h"
 #include "AP_Baro_BMP280.h"
 #include "AP_Baro_HIL.h"
@@ -55,7 +57,7 @@ const AP_Param::GroupInfo AP_Baro::var_info[] = {
     // @Param: ABS_PRESS
     // @DisplayName: Absolute Pressure
     // @Description: calibrated ground pressure in Pascals
-    // @Units: pascals
+    // @Units: Pa
     // @Increment: 1
     // @ReadOnly: True
     // @Volatile: True
@@ -65,7 +67,7 @@ const AP_Param::GroupInfo AP_Baro::var_info[] = {
     // @Param: TEMP
     // @DisplayName: ground temperature
     // @Description: calibrated ground temperature in degrees Celsius
-    // @Units: degrees celsius
+    // @Units: degC
     // @Increment: 1
     // @ReadOnly: True
     // @Volatile: True
@@ -78,7 +80,7 @@ const AP_Param::GroupInfo AP_Baro::var_info[] = {
     // @Param: ALT_OFFSET
     // @DisplayName: altitude offset
     // @Description: altitude offset in meters added to barometric altitude. This is used to allow for automatic adjustment of the base barometric altitude by a ground station equipped with a barometer. The value is added to the barometric altitude read by the aircraft. It is automatically reset to 0 when the barometer is calibrated on each reboot or when a preflight calibration is performed.
-    // @Units: meters
+    // @Units: m
     // @Increment: 0.1
     // @User: Advanced
     AP_GROUPINFO("ALT_OFFSET", 5, AP_Baro, _alt_offset, 0),
@@ -107,7 +109,7 @@ const AP_Param::GroupInfo AP_Baro::var_info[] = {
     // @Param: ABS_PRESS2
     // @DisplayName: Absolute Pressure
     // @Description: calibrated ground pressure in Pascals
-    // @Units: pascals
+    // @Units: Pa
     // @Increment: 1
     // @ReadOnly: True
     // @Volatile: True
@@ -121,7 +123,7 @@ const AP_Param::GroupInfo AP_Baro::var_info[] = {
     // @Param: ABS_PRESS3
     // @DisplayName: Absolute Pressure
     // @Description: calibrated ground pressure in Pascals
-    // @Units: pascals
+    // @Units: Pa
     // @Increment: 1
     // @ReadOnly: True
     // @Volatile: True
@@ -388,6 +390,21 @@ void AP_Baro::init(void)
         return;
     }
 
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+    ADD_BACKEND(new AP_Baro_SITL(*this));
+    return;
+#endif
+    
+#if HAL_WITH_UAVCAN
+    bool added;
+    do {
+        added = _add_backend(AP_Baro_UAVCAN::probe(*this));
+        if (_num_drivers == BARO_MAX_DRIVERS || _num_sensors == BARO_MAX_INSTANCES) {
+            return;
+        }
+    } while (added);
+#endif
+
 #if HAL_BARO_DEFAULT == HAL_BARO_PX4 || HAL_BARO_DEFAULT == HAL_BARO_VRBRAIN
     switch (AP_BoardConfig::get_board_type()) {
     case AP_BoardConfig::PX4_BOARD_PX4V1:
@@ -473,22 +490,9 @@ void AP_Baro::init(void)
                                           std::move(hal.i2c_mgr->get_device(_ext_bus, HAL_BARO_MS5611_I2C_ADDR))));
 #endif
     }
-    
-#if HAL_WITH_UAVCAN
-    // If there is place left - allocate one UAVCAN based baro
-    if ((AP_BoardConfig::get_can_enable() != 0) && (hal.can_mgr != nullptr))
-    {
-        if(_num_drivers < BARO_MAX_DRIVERS && _num_sensors < BARO_MAX_INSTANCES)
-        {
-            printf("Creating AP_Baro_UAVCAN\n\r");
-            drivers[_num_drivers] = new AP_Baro_UAVCAN(*this);
-            _num_drivers++;
-        }
-    }
-#endif
 
     if (_num_drivers == 0 || _num_sensors == 0 || drivers[0] == nullptr) {
-        AP_HAL::panic("Baro: unable to initialise driver");
+        AP_BoardConfig::sensor_config_error("Baro: unable to initialise driver");
     }
 }
 
@@ -528,7 +532,8 @@ void AP_Baro::update(void)
             }
             float altitude = sensors[i].altitude;
             if (sensors[i].type == BARO_TYPE_AIR) {
-                altitude = get_altitude_difference(sensors[i].ground_pressure, sensors[i].pressure);
+                float pressure = sensors[i].pressure + sensors[i].p_correction;
+                altitude = get_altitude_difference(sensors[i].ground_pressure, pressure);
             } else if (sensors[i].type == BARO_TYPE_WATER) {
                 //101325Pa is sea level air pressure, 9800 Pascal/ m depth in water.
                 //No temperature or depth compensation for density of water.
@@ -602,3 +607,12 @@ bool AP_Baro::all_healthy(void) const
      }
      return _num_sensors > 0;
 }
+
+// set a pressure correction from AP_TempCalibration
+void AP_Baro::set_pressure_correction(uint8_t instance, float p_correction)
+{
+    if (instance < _num_sensors) {
+        sensors[instance].p_correction = p_correction;
+    }
+}
+

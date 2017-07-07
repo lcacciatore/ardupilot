@@ -83,6 +83,7 @@
 #include <AP_Notify/AP_Notify.h>          // Notify library
 #include <AP_BattMonitor/AP_BattMonitor.h>     // Battery monitor library
 #include <AP_BoardConfig/AP_BoardConfig.h>     // board configuration library
+#include <AP_BoardConfig/AP_BoardConfig_CAN.h>
 #include <AP_LandingGear/AP_LandingGear.h>     // Landing Gear library
 #include <AP_Terrain/AP_Terrain.h>
 #include <AP_ADSB/AP_ADSB.h>
@@ -150,6 +151,16 @@ public:
     void setup() override;
     void loop() override;
 
+    enum AUTOTUNE_LEVEL_ISSUE {
+        AUTOTUNE_LEVEL_ISSUE_NONE,
+        AUTOTUNE_LEVEL_ISSUE_ANGLE_ROLL,
+        AUTOTUNE_LEVEL_ISSUE_ANGLE_PITCH,
+        AUTOTUNE_LEVEL_ISSUE_ANGLE_YAW,
+        AUTOTUNE_LEVEL_ISSUE_RATE_ROLL,
+        AUTOTUNE_LEVEL_ISSUE_RATE_PITCH,
+        AUTOTUNE_LEVEL_ISSUE_RATE_YAW,
+    };
+
 private:
     // key aircraft parameters passed to multiple libraries
     AP_Vehicle::MultiCopter aparm;
@@ -171,9 +182,6 @@ private:
 
     // used to detect MAVLink acks from GCS to stop compassmot
     uint8_t command_ack_counter;
-
-    // has a log download started?
-    bool in_log_download;
 
     // primary input control channels
     RC_Channel *channel_roll;
@@ -274,6 +282,8 @@ private:
             uint8_t land_repo_active        : 1; // 22      // true if the pilot is overriding the landing position
             uint8_t motor_interlock_switch  : 1; // 23      // true if pilot is requesting motor interlock enable
             uint8_t in_arming_delay         : 1; // 24      // true while we are armed but waiting to spin motors
+            uint8_t initialised_params      : 1; // 25      // true when the all parameters have been initialised. we cannot send parameters to the GCS until this is done
+            uint8_t compass_init_location   : 1; // 26      // true when the compass's initial location has been set
         };
         uint32_t value;
     } ap;
@@ -307,6 +317,11 @@ private:
 
     // board specific config
     AP_BoardConfig BoardConfig;
+
+#if HAL_WITH_UAVCAN
+    // board specific config for CAN bus
+    AP_BoardConfig_CAN BoardConfig_CAN;
+#endif
 
     // receiver RSSI
     uint8_t receiver_rssi;
@@ -589,6 +604,9 @@ private:
     // last valid RC input time
     uint32_t last_radio_update_ms;
 
+    // last esc calibration notification update
+    uint32_t esc_calibration_notify_update_ms;
+
 #if VISUAL_ODOMETRY_ENABLED == ENABLED
     // last visual odometry update time
     uint32_t visual_odom_last_update_ms;
@@ -638,6 +656,7 @@ private:
     void update_mount();
     void update_trigger(void);
     void update_batt_compass(void);
+    void fourhundred_hz_logging();
     void ten_hz_logging_loop();
     void twentyfive_hz_logging();
     void three_hz_loop();
@@ -688,7 +707,6 @@ private:
     void send_hwstatus(mavlink_channel_t chan);
     void send_vfr_hud(mavlink_channel_t chan);
     void send_current_waypoint(mavlink_channel_t chan);
-    void send_rangefinder(mavlink_channel_t chan);
     void send_proximity(mavlink_channel_t chan, uint16_t count_max);
     void send_rpm(mavlink_channel_t chan);
     void rpm_update();
@@ -715,6 +733,7 @@ private:
     void Log_Write_Control_Tuning();
     void Log_Write_Performance();
     void Log_Write_Attitude();
+    void Log_Write_EKF_POS();
     void Log_Write_MotBatt();
     void Log_Write_Event(uint8_t id);
     void Log_Write_Data(uint8_t id, int32_t value);
@@ -748,10 +767,8 @@ private:
     void userhook_SuperSlowLoop();
     void update_home_from_EKF();
     void set_home_to_current_location_inflight();
-    bool set_home_to_current_location();
-    bool set_home_to_current_location_and_lock();
-    bool set_home_and_lock(const Location& loc);
-    bool set_home(const Location& loc);
+    bool set_home_to_current_location(bool lock);
+    bool set_home(const Location& loc, bool lock);
     bool far_from_EKF_origin(const Location& loc);
     void set_system_time_from_GPS();
     void exit_mission();
@@ -811,6 +828,7 @@ private:
     void autotune_stop();
     bool autotune_start(bool ignore_checks);
     void autotune_run();
+    bool autotune_currently_level();
     void autotune_attitude_control();
     void autotune_backup_gains_and_initialise();
     void autotune_load_orig_gains();
@@ -831,6 +849,13 @@ private:
     void autotune_twitching_measure_acceleration(float &rate_of_change, float rate_measurement, float &rate_measurement_max);
     void autotune_get_poshold_attitude(float &roll_cd, float &pitch_cd, float &yaw_cd);
     void avoidance_adsb_update(void);
+    void autotune_send_step_string();
+    const char *autotune_level_issue_string() const;
+    const char * autotune_type_string() const;
+    void autotune_announce_state_to_gcs();
+    void autotune_do_gcs_announcements();
+    bool autotune_check_level(const enum AUTOTUNE_LEVEL_ISSUE issue, const float current, const float maximum) const;
+
 #if ADVANCED_FAILSAFE == ENABLED
     void afs_fs_check(void);
 #endif
@@ -939,6 +964,7 @@ private:
     void esc_calibration_startup_check();
     void esc_calibration_passthrough();
     void esc_calibration_auto();
+    void esc_calibration_notify();
     bool should_disarm_on_failsafe();
     void failsafe_radio_on_event();
     void failsafe_radio_off_event();

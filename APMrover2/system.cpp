@@ -107,6 +107,9 @@ void Rover::init_ardupilot()
     hal.scheduler->register_delay_callback(mavlink_delay_cb_static, 5);
 
     BoardConfig.init();
+#if HAL_WITH_UAVCAN
+    BoardConfig_CAN.init();
+#endif
 
     // initialise notify system
     notify.init(false);
@@ -115,9 +118,9 @@ void Rover::init_ardupilot()
 
     ServoRelayEvents.set_channel_mask(0xFFF0);
 
-    set_control_channels();
-
     battery.init();
+
+    rssi.init();
 
     // keep a record of how many resets have happened. This can be
     // used to detect in-flight resets
@@ -145,27 +148,30 @@ void Rover::init_ardupilot()
     log_init();
 #endif
 
-    if (g.compass_enabled == true) {
-        if (!compass.init()|| !compass.read()) {
-            cliSerial->printf("Compass initialisation failed!\n");
-            g.compass_enabled = false;
-        } else {
-            ahrs.set_compass(&compass);
-            // compass.get_offsets();  // load offsets to account for airframe magnetic interference
-        }
-    }
+    // initialise compass
+    init_compass();
 
     // initialise sonar
     init_sonar();
+
+    // init beacons used for non-gps position estimation
+    init_beacon();
+
+    // init visual odometry
+    init_visual_odom();
 
     // and baro for EKF
     init_barometer(true);
 
     // Do GPS init
-    gps.init(&DataFlash, serial_manager);
+    gps.set_log_gps_bit(MASK_LOG_GPS);
+    gps.init(serial_manager);
 
     rc_override_active = hal.rcin->set_overrides(rc_override, 8);
 
+    ins.set_log_raw_bit(MASK_LOG_IMU_RAW);
+
+    set_control_channels();
     init_rc_in();        // sets up rc channels from radio
     init_rc_out();        // sets up the timer libs
 
@@ -181,6 +187,9 @@ void Rover::init_ardupilot()
       the RC library being initialised.
      */
     hal.scheduler->register_timer_failsafe(failsafe_check_static, 1000);
+
+    // give AHRS the range beacon sensor
+    ahrs.set_beacon(&g2.beacon);
 
 
 #if CLI_ENABLED == ENABLED
@@ -211,6 +220,12 @@ void Rover::init_ardupilot()
     // set the correct flight mode
     // ---------------------------
     reset_control_switch();
+
+    // disable safety if requested
+    BoardConfig.init_safety();
+
+    // flag that initialisation has completed
+    initialised = true;
 }
 
 //*********************************************************************************
@@ -240,12 +255,15 @@ void Rover::startup_ground(void)
     // initialise mission library
     mission.init();
 
+    // initialise DataFlash library
+    DataFlash.set_mission(&mission);
+    DataFlash.setVehicle_Startup_Log_Writer(
+        FUNCTOR_BIND(&rover, &Rover::Log_Write_Vehicle_Startup_Messages, void)
+        );
+
     // we don't want writes to the serial port to cause us to pause
     // so set serial ports non-blocking once we are ready to drive
     serial_manager.set_blocking_writes_all(false);
-
-    ins.set_raw_logging(should_log(MASK_LOG_IMU_RAW));
-    ins.set_dataflash(&DataFlash);
 
     gcs_send_text(MAV_SEVERITY_INFO, "Ready to drive");
 }
@@ -268,7 +286,7 @@ void Rover::set_reverse(bool reverse)
 
 void Rover::set_mode(enum mode mode)
 {
-    if (control_mode == mode){
+    if (control_mode == mode) {
         // don't switch modes if we are already in the correct mode.
         return;
     }
@@ -282,7 +300,6 @@ void Rover::set_mode(enum mode mode)
     }
 
     control_mode = mode;
-    throttle_last = 0;
     throttle = 500;
     if (!in_auto_reverse) {
         set_reverse(false);
@@ -318,13 +335,11 @@ void Rover::set_mode(enum mode mode)
 
     case GUIDED:
         auto_throttle_mode = true;
-        rtl_complete = false;
         /*
            when entering guided mode we set the target as the current
            location. This matches the behaviour of the copter code.
            */
-        guided_WP = current_loc;
-        set_guided_WP();
+        set_guided_WP(current_loc);
         break;
 
     default:
@@ -359,48 +374,6 @@ bool Rover::mavlink_set_mode(uint8_t mode)
     return false;
 }
 
-/*
-  called to set/unset a failsafe event.
- */
-void Rover::failsafe_trigger(uint8_t failsafe_type, bool on)
-{
-    uint8_t old_bits = failsafe.bits;
-    if (on) {
-        failsafe.bits |= failsafe_type;
-    } else {
-        failsafe.bits &= ~failsafe_type;
-    }
-    if (old_bits == 0 && failsafe.bits != 0) {
-        // a failsafe event has started
-        failsafe.start_time = millis();
-    }
-    if (failsafe.triggered != 0 && failsafe.bits == 0) {
-        // a failsafe event has ended
-        gcs_send_text_fmt(MAV_SEVERITY_INFO, "Failsafe ended");
-    }
-
-    failsafe.triggered &= failsafe.bits;
-
-    if (failsafe.triggered == 0 &&
-        failsafe.bits != 0 &&
-        millis() - failsafe.start_time > g.fs_timeout*1000 &&
-        control_mode != RTL &&
-        control_mode != HOLD) {
-        failsafe.triggered = failsafe.bits;
-        gcs_send_text_fmt(MAV_SEVERITY_WARNING, "Failsafe trigger 0x%x", (unsigned)failsafe.triggered);
-        switch (g.fs_action) {
-        case 0:
-            break;
-        case 1:
-            set_mode(RTL);
-            break;
-        case 2:
-            set_mode(HOLD);
-            break;
-        }
-    }
-}
-
 void Rover::startup_INS_ground(void)
 {
     gcs_send_text(MAV_SEVERITY_INFO, "Warming up ADC");
@@ -412,6 +385,7 @@ void Rover::startup_INS_ground(void)
     mavlink_delay(1000);
 
     ahrs.init();
+    // say to EKF that rover only move by goind forward
     ahrs.set_fly_forward(true);
     ahrs.set_vehicle_class(AHRS_VEHICLE_GROUND);
 
@@ -467,7 +441,7 @@ void Rover::print_mode(AP_HAL::BetterStream *port, uint8_t mode)
         port->printf("RTL");
         break;
     default:
-        port->printf("Mode(%u)", (unsigned)mode);
+        port->printf("Mode(%u)", static_cast<uint32_t>(mode));
         break;
     }
 }
@@ -513,7 +487,7 @@ void Rover::notify_mode(enum mode new_mode)
  */
 uint8_t Rover::check_digital_pin(uint8_t pin)
 {
-    int8_t dpin = hal.gpio->analogPinToDigitalPin(pin);
+    const int8_t dpin = hal.gpio->analogPinToDigitalPin(pin);
     if (dpin == -1) {
         return 0;
     }
@@ -531,14 +505,11 @@ uint8_t Rover::check_digital_pin(uint8_t pin)
  */
 bool Rover::should_log(uint32_t mask)
 {
-    if (!(mask & g.log_bitmask) || in_mavlink_delay) {
+    if (!DataFlash.should_log(mask)) {
         return false;
     }
-    bool ret = hal.util->get_soft_armed() || DataFlash.log_while_disarmed();
-    if (ret && !DataFlash.logging_started() && !in_log_download) {
-        start_logging();
-    }
-    return ret;
+    start_logging();
+    return true;
 }
 
 /*

@@ -52,7 +52,6 @@ const AP_Scheduler::Task Plane::scheduler_tasks[] = {
     SCHED_TASK(gcs_update,             50,    500),
     SCHED_TASK(gcs_data_stream_send,   50,    500),
     SCHED_TASK(update_events,          50,    150),
-    SCHED_TASK(check_usb_mux,          10,    100),
     SCHED_TASK(read_battery,           10,    300),
     SCHED_TASK(compass_accumulate,     50,    200),
     SCHED_TASK(barometer_accumulate,   50,    150),
@@ -357,8 +356,6 @@ void Plane::one_second_loop()
     }
 #endif
 
-    ins.set_raw_logging(should_log(MASK_LOG_IMU_RAW));
-
     // update home position if soft armed and gps position has
     // changed. Update every 5s at most
     if (!hal.util->get_soft_armed() &&
@@ -381,7 +378,7 @@ void Plane::one_second_loop()
 void Plane::log_perf_info()
 {
     if (scheduler.debug() != 0) {
-        gcs_send_text_fmt(MAV_SEVERITY_INFO, "PERF: %u/%u Dt=%u/%u Log=%u\n",
+        gcs_send_text_fmt(MAV_SEVERITY_INFO, "PERF: %u/%u Dt=%u/%u Log=%u",
                           (unsigned)perf.num_long,
                           (unsigned)perf.mainLoop_count,
                           (unsigned)perf.G_Dt_max,
@@ -596,9 +593,14 @@ void Plane::update_flight_mode(void)
         steer_state.hold_course_cd = -1;
     }
 
-    // ensure we are fly-forward
-    if (quadplane.in_vtol_mode()) {
+    // ensure we are fly-forward when we are flying as a pure fixed
+    // wing aircraft. This helps the EKF produce better state
+    // estimates as it can make stronger assumptions
+    if (quadplane.in_vtol_mode() ||
+        quadplane.in_assisted_flight()) {
         ahrs.set_fly_forward(false);
+    } else if (flight_stage == AP_Vehicle::FixedWing::FLIGHT_LAND) {
+        ahrs.set_fly_forward(landing.is_flying_forward());
     } else {
         ahrs.set_fly_forward(true);
     }
@@ -770,12 +772,20 @@ void Plane::update_flight_mode(void)
         nav_roll_cd  = (channel_roll->get_control_in() / 4500.0) * roll_limit;
         nav_roll_cd = constrain_int32(nav_roll_cd, -roll_limit, roll_limit);
         float pitch_input = channel_pitch->norm_input();
-        if (pitch_input > 0) {
-            nav_pitch_cd = pitch_input * MIN(aparm.pitch_limit_max_cd, quadplane.aparm.angle_max);
+        // Scale from normalized input [-1,1] to centidegrees
+        if (quadplane.tailsitter_active()) {
+            // For tailsitters, the pitch range is symmetrical: [-Q_ANGLE_MAX,Q_ANGLE_MAX]
+            nav_pitch_cd = pitch_input * quadplane.aparm.angle_max;
         } else {
-            nav_pitch_cd = pitch_input * MIN(-pitch_limit_min_cd, quadplane.aparm.angle_max);
+            // pitch is further constrained by LIM_PITCH_MIN/MAX which may impose
+            // tighter (possibly asymmetrical) limits than Q_ANGLE_MAX
+            if (pitch_input > 0) {
+                nav_pitch_cd = pitch_input * MIN(aparm.pitch_limit_max_cd, quadplane.aparm.angle_max);
+            } else {
+                nav_pitch_cd = pitch_input * MIN(-pitch_limit_min_cd, quadplane.aparm.angle_max);
+            }
+            nav_pitch_cd = constrain_int32(nav_pitch_cd, pitch_limit_min_cd, aparm.pitch_limit_max_cd.get());
         }
-        nav_pitch_cd = constrain_int32(nav_pitch_cd, pitch_limit_min_cd, aparm.pitch_limit_max_cd.get());
         break;
     }
         

@@ -105,8 +105,8 @@ void AP_GPS_Backend::make_gps_time(uint32_t bcd_date, uint32_t bcd_milliseconds)
     ret -= 272764785UL;
 
     // get GPS week and time
-    state.time_week = ret / SEC_PER_WEEK;
-    state.time_week_ms = (ret % SEC_PER_WEEK) * MSEC_PER_SEC;
+    state.time_week = ret / AP_SEC_PER_WEEK;
+    state.time_week_ms = (ret % AP_SEC_PER_WEEK) * AP_MSEC_PER_SEC;
     state.time_week_ms += msec;
 }
 
@@ -141,7 +141,7 @@ void AP_GPS_Backend::_detection_message(char *buffer, const uint8_t buflen) cons
     const uint8_t instance = state.instance;
     const struct AP_GPS::detect_state dstate = gps.detect_state[instance];
 
-    if (dstate.detect_started_ms > 0) {
+    if (dstate.auto_detected_baud) {
         hal.util->snprintf(buffer, buflen,
                  "GPS %d: detected as %s at %d baud",
                  instance + 1,
@@ -167,5 +167,20 @@ void AP_GPS_Backend::Write_DataFlash_Log_Startup_messages() const
 {
     char buffer[64];
     _detection_message(buffer, sizeof(buffer));
-    gps._DataFlash->Log_Write_Message(buffer);
+    DataFlash_Class::instance()->Log_Write_Message(buffer);
+}
+
+bool AP_GPS_Backend::should_df_log() const
+{
+    DataFlash_Class *instance = DataFlash_Class::instance();
+    if (instance == nullptr) {
+        return false;
+    }
+    if (gps._log_gps_bit == (uint32_t)-1) {
+        return false;
+    }
+    if (!instance->should_log(gps._log_gps_bit)) {
+        return false;
+    }
+    return true;
 }

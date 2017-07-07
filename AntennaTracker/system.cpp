@@ -41,6 +41,9 @@ void Tracker::init_tracker()
     hal.scheduler->register_delay_callback(mavlink_delay_cb_static, 5);
     
     BoardConfig.init();
+#if HAL_WITH_UAVCAN
+    BoardConfig_CAN.init();
+#endif
 
     // initialise notify
     notify.init(false);
@@ -76,7 +79,8 @@ void Tracker::init_tracker()
     }
 
     // GPS Initialization
-    gps.init(nullptr, serial_manager);
+    gps.set_log_gps_bit(MASK_LOG_GPS);
+    gps.init(serial_manager);
 
     ahrs.init();
     ahrs.set_fly_forward(false);
@@ -85,6 +89,9 @@ void Tracker::init_tracker()
     ahrs.reset();
 
     init_barometer(true);
+
+    // initialise DataFlash library
+    DataFlash.setVehicle_Startup_Log_Writer(FUNCTOR_BIND(&tracker, &Tracker::Log_Write_Vehicle_Startup_Messages, void));
 
     // set serial ports non-blocking
     serial_manager.set_blocking_writes_all(false);
@@ -120,6 +127,8 @@ void Tracker::init_tracker()
         prepare_servos();
     }
 
+    // disable safety if requested
+    BoardConfig.init_safety();    
 }
 
 // updates the status of the notify objects
@@ -170,11 +179,13 @@ void Tracker::set_home(struct Location temp)
 void Tracker::arm_servos()
 {
     hal.util->set_soft_armed(true);
+    DataFlash.set_vehicle_armed(true);
 }
 
 void Tracker::disarm_servos()
 {
     hal.util->set_soft_armed(false);
+    DataFlash.set_vehicle_armed(false);
 }
 
 /*
@@ -248,7 +259,7 @@ void Tracker::check_usb_mux(void)
  */
 bool Tracker::should_log(uint32_t mask)
 {
-    if (!(mask & g.log_bitmask) || in_mavlink_delay) {
+    if (!DataFlash.should_log(mask)) {
         return false;
     }
     return true;

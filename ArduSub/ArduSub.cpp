@@ -94,16 +94,6 @@ void Sub::setup()
 }
 
 /*
-  if the compass is enabled then try to accumulate a reading
- */
-void Sub::compass_accumulate(void)
-{
-    if (g.compass_enabled) {
-        compass.accumulate();
-    }
-}
-
-/*
   try to accumulate a baro reading
  */
 void Sub::barometer_accumulate(void)
@@ -117,7 +107,7 @@ void Sub::perf_update(void)
         Log_Write_Performance();
     }
     if (scheduler.debug()) {
-        gcs_send_text_fmt(MAV_SEVERITY_WARNING, "PERF: %u/%u %lu %lu\n",
+        gcs_send_text_fmt(MAV_SEVERITY_WARNING, "PERF: %u/%u %lu %lu",
                           (unsigned)perf_info_get_num_long_running(),
                           (unsigned)perf_info_get_num_loops(),
                           (unsigned long)perf_info_get_max_time(),
@@ -387,9 +377,6 @@ void Sub::one_hz_loop()
 
     // update position controller alt limits
     update_poscon_alt_max();
-
-    // enable/disable raw gyro/accel logging
-    ins.set_raw_logging(should_log(MASK_LOG_IMU_RAW));
 
     // log terrain data
     terrain_logging();

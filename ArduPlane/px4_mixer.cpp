@@ -99,11 +99,13 @@ uint16_t Plane::create_mixer(char *buf, uint16_t buf_size, const char *filename)
             rev = false;
             mix = mix_max*mixmul[g.elevon_output][0];
         } else if (function == SRV_Channel::k_aileron || 
-                   function == SRV_Channel::k_flaperon1 || 
-                   function == SRV_Channel::k_flaperon2) {
+                   function == SRV_Channel::k_flaperon_left || 
+                   function == SRV_Channel::k_flaperon_right ||
+                   function == SRV_Channel::k_aileron_with_input) {
             // a secondary aileron. We don't mix flap input in yet for flaperons
             c1 = rcmap.roll()-1;
-        } else if (function == SRV_Channel::k_elevator) {
+        } else if (function == SRV_Channel::k_elevator ||
+                   function == SRV_Channel::k_elevator_with_input) {
             // a secondary elevator
             c1 = rcmap.pitch()-1;
         } else if (function == SRV_Channel::k_rudder || 
@@ -116,8 +118,6 @@ uint16_t Plane::create_mixer(char *buf, uint16_t buf_size, const char *filename)
             // a flap output channel, and we have a manual flap input channel
             c1 = g.flapin_channel-1;
         } else if (i < 4 ||
-                   function == SRV_Channel::k_elevator_with_input ||
-                   function == SRV_Channel::k_aileron_with_input ||
                    function == SRV_Channel::k_manual) {
             // a pass-thru channel
             c1 = i;
@@ -354,8 +354,7 @@ bool Plane::setup_failsafe_mixing(void)
     }
 
     for (uint8_t i = 0; i < pwm_values.channel_count; i++) {
-        if (SRV_Channels::channel_function(i) >= SRV_Channel::k_motor1 &&
-            SRV_Channels::channel_function(i) <= SRV_Channel::k_motor8) {
+        if (SRV_Channel::is_motor(SRV_Channels::channel_function(i))) {
             pwm_values.values[i] = quadplane.thr_min_pwm;
         } else {
             pwm_values.values[i] = 900;
@@ -367,8 +366,7 @@ bool Plane::setup_failsafe_mixing(void)
     }
 
     for (uint8_t i = 0; i < pwm_values.channel_count; i++) {
-        if (SRV_Channels::channel_function(i) >= SRV_Channel::k_motor1 &&
-            SRV_Channels::channel_function(i) <= SRV_Channel::k_motor8) {
+        if (SRV_Channel::is_motor(SRV_Channels::channel_function(i))) {
             hal.rcout->write(i, quadplane.thr_min_pwm);
             pwm_values.values[i] = quadplane.thr_min_pwm;
         } else {
@@ -415,6 +413,5 @@ failed:
     }
     return ret;
 }
-
 
 #endif // CONFIG_HAL_BOARD

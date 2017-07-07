@@ -22,6 +22,7 @@ public:
         //
         k_param_format_version = 0,
         k_param_software_type,
+        k_param_BoardConfig_CAN,
 
         // Misc
         //
@@ -129,7 +130,7 @@ public:
         k_param_throttle_slewrate,
         k_param_throttle_reduction,
         k_param_skid_steer_in,
-        k_param_skid_steer_out,
+        k_param_skid_steer_out_old,
 
         // failsafe control
         k_param_fs_action = 180,
@@ -249,7 +250,6 @@ public:
     AP_Int8     throttle_cruise;
     AP_Int8     throttle_slewrate;
     AP_Int8     skid_steer_in;
-    AP_Int8     skid_steer_out;
 
     // failsafe control
     AP_Int8     fs_action;
@@ -288,7 +288,7 @@ public:
     Parameters() :
         // PID controller    initial P        initial I        initial D        initial imax
         //-----------------------------------------------------------------------------------
-        pidSpeedThrottle    (0.7,             0.2,             0.2,             4000)
+        pidSpeedThrottle    (0.7f,            0.2f,            0.2f,            4000)
         {}
 };
 
@@ -310,7 +310,7 @@ public:
 
     // RC input channels
     RC_Channels rc_channels;
-    
+
     // control over servo output ranges
     SRV_Channels servo_channels;
 
@@ -318,7 +318,10 @@ public:
     // advanced failsafe library
     AP_AdvancedFailsafe_Rover afs;
 #endif
+    AP_Beacon beacon;
 
+    // Visual Odometry camera
+    AP_VisualOdom visual_odom;
 };
 
 extern const AP_Param::Info var_info[];

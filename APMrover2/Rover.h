@@ -61,6 +61,7 @@
 #include <APM_Control/APM_Control.h>
 #include <AP_L1_Control/AP_L1_Control.h>
 #include <AP_BoardConfig/AP_BoardConfig.h>
+#include <AP_BoardConfig/AP_BoardConfig_CAN.h>
 #include <AP_Frsky_Telem/AP_Frsky_Telem.h>
 
 #include "AP_Arming.h"
@@ -73,6 +74,7 @@
 #include <AP_Button/AP_Button.h>
 #include <AP_Stats/AP_Stats.h>                      // statistics library
 #include <AP_Beacon/AP_Beacon.h>
+#include <AP_VisualOdom/AP_VisualOdom.h>
 
 // Configuration
 #include "config.h"
@@ -128,14 +130,17 @@ private:
     // board specific config
     AP_BoardConfig BoardConfig;
 
+#if HAL_WITH_UAVCAN
+    // board specific config for CAN bus
+    AP_BoardConfig_CAN BoardConfig_CAN;
+#endif
+
     // primary control channels
     RC_Channel *channel_steer;
     RC_Channel *channel_throttle;
     RC_Channel *channel_learn;
 
     DataFlash_Class DataFlash;
-
-    bool in_log_download;
 
     // sensor drivers
     AP_GPS gps;
@@ -186,7 +191,7 @@ private:
     AP_SerialManager serial_manager;
     const uint8_t num_gcs;
     GCS_MAVLINK_Rover gcs_chan[MAVLINK_COMM_NUM_BUFFERS];
-    GCS _gcs; // avoid using this; use gcs()
+    GCS _gcs;  // avoid using this; use gcs()
     GCS &gcs() { return _gcs; }
 
     // relay support
@@ -207,6 +212,9 @@ private:
     // current_loc uses the baro/gps solution for altitude rather than gps only.
     AP_Mount camera_mount;
 #endif
+
+    // true if initialisation has completed
+    bool initialised;
 
     // if USB is connected
     bool usb_connected;
@@ -241,10 +249,6 @@ private:
 
     // notification object for LEDs, buzzers etc (parameter set to false disables external leds)
     AP_Notify notify;
-
-    // A counter used to count down valid gps fixes to allow the gps estimate to settle
-    // before recording our home position (and executing a ground start if we booted with an air start)
-    uint8_t ground_start_count;
 
     // true if we have a position estimate from AHRS
     bool have_position;
@@ -284,7 +288,6 @@ private:
     // Ground speed
     // The amount current ground speed is below min ground speed.  meters per second
     float ground_speed;
-    int16_t throttle_last;
     int16_t throttle;
 
     // CH7 control
@@ -323,6 +326,9 @@ private:
     // For example in a delay command the condition_start records that start time for the delay
     int32_t condition_start;
 
+    // Use for stopping navigation in auto mode and do rotation on spot.
+    bool do_auto_rotation;
+
     // 3D Location vectors
     // Location structure defined in AP_Common
     // The home location used for RTL.  The location is set when we first get stable GPS lock
@@ -331,12 +337,16 @@ private:
     // Flag for if we have g_gps lock and have set the home location in AHRS
     enum HomeState home_is_set = HOME_UNSET;
 
+    // true if the system time has been set from the GPS
+    bool system_time_set;
+
+    // true if the compass's initial location has been set
+    bool compass_init_location;
+
     // The location of the previous waypoint.  Used for track following and altitude ramp calculations
     struct Location prev_WP;
     // The location of the current/active waypoint.  Used for track following
     struct Location next_WP;
-    // The location of the active waypoint in Guided mode.
-    struct Location guided_WP;
 
     // IMU variables
     // The main loop execution time.  Seconds
@@ -344,7 +354,7 @@ private:
     float G_Dt;
 
     // Performance monitoring
-    // Timer used to accrue data and trigger recording of the performanc monitoring log message
+    // Timer used to accrue data and trigger recording of the performance monitoring log message
     int32_t perf_mon_timer;
     // The maximum main loop execution time recorded in the current performance monitoring interval
     uint32_t G_Dt_max;
@@ -362,6 +372,9 @@ private:
 
     // set if the users asks for auto reverse
     bool in_auto_reverse;
+
+    // true if pivoting (set by use_pivot_steering)
+    bool pivot_steering_active;
 
     static const AP_Scheduler::Task scheduler_tasks[];
 
@@ -388,18 +401,21 @@ private:
     // we need to run the speed controller
     bool auto_throttle_mode;
 
+    // Guided control
+    GuidedMode guided_mode;             // controls which controller is run (waypoint or velocity)
+    // Store parameters from Guided msg
+    struct {
+      float turn_angle;          // target heading in centi-degrees
+      float target_speed;        // target speed in m/s
+      float target_steer_speed;  // target steer speed in degree/s
+      uint32_t msg_time_ms;      // time of last guided message
+    } guided_control;
+
     // Store the time the last GPS message was received.
     uint32_t last_gps_msg_ms{0};
 
-    // Store parameters from NAV_SET_YAW_SPEED
-    struct {
-        float turn_angle;
-        float target_speed;
-        uint32_t msg_time_ms;
-    } guided_yaw_speed;
-
-    // Guided
-    GuidedMode guided_mode;  // stores which GUIDED mode the vehicle is in
+    // last visual odometry update time
+    uint32_t visual_odom_last_update_ms;
 
 private:
     // private member functions
@@ -408,6 +424,7 @@ private:
     void update_trigger(void);
     void update_alt();
     void gcs_failsafe_check(void);
+    void init_compass(void);
     void compass_accumulate(void);
     void compass_cal_update(void);
     void update_compass(void);
@@ -447,6 +464,7 @@ private:
     void Log_Write_Control_Tuning();
     void Log_Write_Nav_Tuning();
     void Log_Write_Sonar();
+    void Log_Write_Beacon();
     void Log_Write_Current();
     void Log_Write_Attitude();
     void Log_Write_RC(void);
@@ -460,22 +478,29 @@ private:
     void Log_Arm_Disarm();
 
     void load_parameters(void);
-    void throttle_slew_limit(int16_t last_throttle);
+    void throttle_slew_limit(void);
     bool auto_check_trigger(void);
     bool use_pivot_steering(void);
     void calc_throttle(float target_speed);
     void calc_lateral_acceleration();
     void calc_nav_steer();
+    bool have_skid_steering();
+    void mix_skid_steering();
     void set_servos(void);
-    void set_next_WP(const struct Location& loc);
-    void set_guided_WP(void);
-    void init_home();
+    void set_auto_WP(const struct Location& loc);
+    void set_guided_WP(const struct Location& loc);
+    void set_guided_velocity(float target_steer_speed, float target_speed);
+    void update_home_from_EKF();
+    bool set_home_to_current_location(bool lock);
+    bool set_home(const Location& loc, bool lock);
+    void set_system_time_from_GPS();
     void restart_nav();
     void exit_mission();
     void do_RTL(void);
     bool verify_RTL();
     bool verify_wait_delay();
     bool verify_within_distance();
+    bool verify_yaw();
 #if CAMERA == ENABLED
     void do_take_picture();
     void log_picture();
@@ -501,6 +526,10 @@ private:
     void trim_radio();
     void init_barometer(bool full_calibration);
     void init_sonar(void);
+    void init_beacon();
+    void update_beacon();
+    void init_visual_odom();
+    void update_visual_odom();
     void read_battery(void);
     void read_receiver_rssi(void);
     void read_sonars(void);
@@ -545,6 +574,7 @@ private:
     bool verify_loiter_time(const AP_Mission::Mission_Command& cmd);
     void do_wait_delay(const AP_Mission::Mission_Command& cmd);
     void do_within_distance(const AP_Mission::Mission_Command& cmd);
+    void do_yaw(const AP_Mission::Mission_Command& cmd);
     void do_change_speed(const AP_Mission::Mission_Command& cmd);
     void do_set_home(const AP_Mission::Mission_Command& cmd);
 #if CAMERA == ENABLED
@@ -561,6 +591,8 @@ private:
     void update_home();
     void accel_cal_update(void);
     void nav_set_yaw_speed();
+    bool do_yaw_rotation();
+    void nav_set_speed();
     bool in_stationary_loiter(void);
     void set_loiter_active(const AP_Mission::Mission_Command& cmd);
     void Log_Write_GuidedTarget(uint8_t target_type, const Vector3f& pos_target, const Vector3f& vel_target);
